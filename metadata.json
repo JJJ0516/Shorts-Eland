@@ -1,0 +1,5 @@
+{
+  "name": "Short-form Video Automation Pipeline",
+  "description": "Automated pipeline for creating short-form video content using AI, Google Sheets, and Drive.",
+  "requestFramePermissions": []
+}
