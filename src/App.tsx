@@ -9,14 +9,14 @@ import {
   Video, 
   Youtube,
   Plus,
-  Loader2,
   TrendingUp,
   CheckCircle2,
   ChevronRight,
   Search,
   Trash2,
   Menu,
-  X
+  X,
+  Settings
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import { cn } from './lib/utils';
@@ -440,6 +440,23 @@ export default function App() {
     }));
   };
 
+  const refreshTopicsFromSheet = async () => {
+    setIsGenerating(true);
+    try {
+      const res = await fetch('/api/get-existing-topics');
+      const data = await res.json();
+      if (data.topics) {
+        setTopics(data.topics);
+        alert('구글 시트에서 데이터를 성공적으로 불러왔습니다.');
+      }
+    } catch (err) {
+      console.error("Failed to refresh topics from sheet:", err);
+      alert('시트 데이터를 불러오는 데 실패했습니다.');
+    } finally {
+      setIsGenerating(false);
+    }
+  };
+
   const generateTopics = async (keyword?: string) => {
     setIsGenerating(true);
     try {
@@ -515,9 +532,10 @@ ${existingAnecdotes.join(', ')}`;
                 일화: { type: Type.STRING },
                 가치: { type: Type.STRING },
                 영상앵글: { type: Type.STRING },
-                검색키워드: { type: Type.STRING, description: "인물 이름이 아닌, 이 일화의 핵심 주제나 사건과 관련된 검색어 (예: '마이클 조던의 독감 경기' -> 'NBA 독감 경기', '오드리 헵번의 유니세프 활동' -> '유니세프 구호 활동')" },
+                검색키워드: { type: Type.STRING, description: "Google 트렌드에서 검색량이 잘 잡힐 법한 대중적인 키워드. (예: '마이클 조던의 독감 경기' -> '마이클 조던', '오드리 헵번의 유니세프 활동' -> '오드리 헵번', '퀸의 라이브 에이드 공연' -> '퀸 밴드')" },
+                핵심키워드: { type: Type.STRING, description: "이야기의 핵심 주제를 나타내는 딱 한 단어. 인물명이 아니어야 함. (예: 전쟁, 월드컵, 에이즈, 슈퍼맨, 평화, 희생)" },
               },
-              required: ["분야", "인물", "인물_한글", "감성", "일화", "가치", "영상앵글", "검색키워드"]
+              required: ["분야", "인물", "인물_한글", "감성", "일화", "가치", "영상앵글", "검색키워드", "핵심키워드"]
             }
           }
         }
@@ -527,33 +545,38 @@ ${existingAnecdotes.join(', ')}`;
       
       const topicsWithTrends = await Promise.all(generatedTopics.map(async (t: any) => {
         try {
-          const trendsRes = await fetch(`/api/trends?keyword=${encodeURIComponent(t.검색키워드)}`);
-          const trendsData = await trendsRes.json();
+          // 1. Fetch trends for the main search keyword (Person Index)
+          let trendsRes = await fetch(`/api/trends?keyword=${encodeURIComponent(t.검색키워드)}`);
+          let trendsData = await trendsRes.json();
           
-          const relatedRes = await fetch(`/api/related-queries?keyword=${encodeURIComponent(t.검색키워드)}`);
-          const relatedData = await relatedRes.json();
-          
-          // Extract top rising related query
-          const topQueries = relatedData.default?.rankedList?.[0]?.rankedKeyword || [];
-          const risingQueries = relatedData.default?.rankedList?.[1]?.rankedKeyword || [];
-          
-          // Prefer rising, fallback to top
-          const bestQuery = risingQueries.length > 0 ? risingQueries[0] : (topQueries.length > 0 ? topQueries[0] : null);
+          // Fallback to person name if specific keyword returns nothing
+          if ((!trendsData.recentAverage || trendsData.recentAverage === 0) && t.인물_한글) {
+            console.log(`[TopicGen] Falling back to person name for ${t.인물_한글}`);
+            trendsRes = await fetch(`/api/trends?keyword=${encodeURIComponent(t.인물_한글)}`);
+            trendsData = await trendsRes.json();
+          }
 
+          // 2. Fetch trends for the core keyword (Related Keyword Index)
+          // This gives us the growth rate for the specific story theme
+          let coreTrendsRes = await fetch(`/api/trends?keyword=${encodeURIComponent(t.핵심키워드)}`);
+          let coreTrendsData = await coreTrendsRes.json();
+          
           const avgValue = trendsData.recentAverage || 0;
-          const growthRate = trendsData.growthRate || 0;
+          const growthRate = coreTrendsData.growthRate || 0;
+
+          console.log(`[TopicGen] ${t.인물_한글} - Keyword: ${t.검색키워드}, Core: ${t.핵심키워드}, Index: ${avgValue}, Growth: ${growthRate}%`);
 
           return {
             ...t,
             상태: '대기',
             인물지수: avgValue,
-            연관키워드: bestQuery ? bestQuery.query : 'N/A',
-            연관키워드지수: growthRate, // 상승률 (최근 7일 vs 이전 7일)
+            연관키워드: t.핵심키워드, // Use the AI-generated single word
+            연관키워드지수: growthRate, // Growth rate of the core theme
             급상승: (avgValue > 50 || growthRate > 100) ? '🔥' : ''
           };
         } catch (err) {
           console.error("Trends fetch error for", t.인물_한글, err);
-          return { ...t, 상태: '대기', 인물지수: 0, 연관키워드: 'N/A', 연관키워드지수: 0 };
+          return { ...t, 상태: '대기', 인물지수: 0, 연관키워드: t.핵심키워드 || 'N/A', 연관키워드지수: 0 };
         }
       }));
       
@@ -718,19 +741,19 @@ ${existingAnecdotes.join(', ')}`;
                   <div className="flex gap-2">
                     <button
                       onClick={() => generateTopics(searchKeyword)}
-                      disabled={isGenerating || !searchKeyword.trim()}
-                      className="flex-1 flex items-center justify-center gap-2 bg-white/10 hover:bg-white/20 disabled:opacity-50 text-white font-bold px-4 py-3 rounded-full transition-all active:scale-95 border border-white/10 text-sm"
-                    >
-                      {isGenerating && searchKeyword ? <Loader2 className="w-4 h-4 animate-spin" /> : <Search className="w-4 h-4" />}
-                      검색 추천
-                    </button>
-                    <button
-                      onClick={() => generateTopics()}
                       disabled={isGenerating}
                       className="flex-1 flex items-center justify-center gap-2 bg-amber-500 hover:bg-amber-600 disabled:opacity-50 text-black font-bold px-4 py-3 rounded-full transition-all active:scale-95 text-sm"
                     >
-                      {isGenerating && !searchKeyword ? <Loader2 className="w-4 h-4 animate-spin" /> : <Plus className="w-4 h-4" />}
-                      5개 생성
+                      {isGenerating ? <Settings className="w-4 h-4 animate-spin" /> : <Search className="w-4 h-4" />}
+                      AI 소재 생성
+                    </button>
+                    <button
+                      onClick={refreshTopicsFromSheet}
+                      disabled={isGenerating}
+                      className="flex-1 flex items-center justify-center gap-2 bg-white/10 hover:bg-white/20 disabled:opacity-50 text-white font-bold px-4 py-3 rounded-full transition-all active:scale-95 border border-white/10 text-sm"
+                    >
+                      {isGenerating ? <Settings className="w-4 h-4 animate-spin" /> : <Plus className="w-4 h-4" />}
+                      시트 불러오기
                     </button>
                   </div>
                 </div>
@@ -819,7 +842,7 @@ ${existingAnecdotes.join(', ')}`;
                     disabled={isGeneratingScript}
                     className="flex items-center justify-center gap-2 bg-amber-500 hover:bg-amber-600 disabled:opacity-50 text-black font-bold px-4 md:px-8 py-3 rounded-xl transition-all active:scale-95 text-sm md:text-base"
                   >
-                    {isGeneratingScript ? <Loader2 className="w-4 h-4 md:w-5 md:h-5 animate-spin" /> : <FileText className="w-4 h-4 md:w-5 md:h-5" />}
+                    {isGeneratingScript ? <Settings className="w-4 h-4 md:w-5 md:h-5 animate-spin" /> : <FileText className="w-4 h-4 md:w-5 md:h-5" />}
                     대본 작성
                   </button>
                 </motion.div>
@@ -927,7 +950,7 @@ ${existingAnecdotes.join(', ')}`;
                   disabled={isGeneratingCollection || !collectionInfo}
                   className="w-full flex items-center justify-center gap-2 bg-amber-500 hover:bg-amber-600 disabled:opacity-50 text-black font-bold py-4 rounded-xl transition-all"
                 >
-                  {isGeneratingCollection ? <Loader2 className="w-5 h-5 animate-spin" /> : <Video className="w-5 h-5" />}
+                  {isGeneratingCollection ? <Settings className="w-5 h-5 animate-spin" /> : <Video className="w-5 h-5" />}
                   소장품 자막 생성 (8~10번 컷)
                 </button>
               </div>
@@ -968,7 +991,7 @@ ${existingAnecdotes.join(', ')}`;
                   disabled={isSavingToSheet || scripts[selectedTopicIndex]?.length < 10}
                   className="px-6 py-3 rounded-xl border border-amber-500/50 text-amber-500 hover:bg-amber-500/10 transition-colors flex items-center justify-center gap-2 text-sm md:text-base order-2 sm:order-2"
                 >
-                  {isSavingToSheet ? <Loader2 className="w-4 h-4 animate-spin" /> : <FileText className="w-4 h-4" />}
+                  {isSavingToSheet ? <Settings className="w-4 h-4 animate-spin" /> : <FileText className="w-4 h-4" />}
                   시트 저장
                 </button>
                 <button
@@ -976,7 +999,7 @@ ${existingAnecdotes.join(', ')}`;
                   onClick={searchImages}
                   className="px-8 py-3 rounded-xl bg-amber-500 disabled:opacity-50 text-black font-bold hover:bg-amber-600 transition-all active:scale-95 text-sm md:text-base order-1 sm:order-3"
                 >
-                  {isSearchingImages ? <Loader2 className="w-4 h-4 md:w-5 md:h-5 animate-spin" /> : '참조 이미지 검색'}
+                  {isSearchingImages ? <Settings className="w-4 h-4 md:w-5 md:h-5 animate-spin" /> : '참조 이미지 검색'}
                 </button>
               </div>
             </motion.div>
@@ -1046,7 +1069,7 @@ ${existingAnecdotes.join(', ')}`;
                   onClick={generateClipIdeas}
                   className="flex-1 flex items-center justify-center gap-2 bg-amber-500 disabled:opacity-50 text-black font-bold px-4 md:px-8 py-3 rounded-xl transition-all active:scale-95 text-sm md:text-base"
                 >
-                  {isGeneratingIdeas ? <Loader2 className="w-4 h-4 md:w-5 md:h-5 animate-spin" /> : <Lightbulb className="w-4 h-4 md:w-5 md:h-5" />}
+                  {isGeneratingIdeas ? <Settings className="w-4 h-4 md:w-5 md:h-5 animate-spin" /> : <Lightbulb className="w-4 h-4 md:w-5 md:h-5" />}
                   <span className="hidden sm:inline">클립 아이디어 생성</span>
                   <span className="sm:hidden">아이디어 생성</span>
                 </button>
@@ -1104,7 +1127,7 @@ ${existingAnecdotes.join(', ')}`;
                   onClick={generatePrompts}
                   className="flex-1 flex items-center justify-center gap-2 bg-blue-500 disabled:opacity-50 text-white font-bold px-4 md:px-8 py-3 rounded-xl transition-all active:scale-95 text-sm md:text-base"
                 >
-                  {isGeneratingPrompts ? <Loader2 className="w-4 h-4 md:w-5 md:h-5 animate-spin" /> : <Terminal className="w-4 h-4 md:w-5 md:h-5" />}
+                  {isGeneratingPrompts ? <Settings className="w-4 h-4 md:w-5 md:h-5 animate-spin" /> : <Terminal className="w-4 h-4 md:w-5 md:h-5" />}
                   <span className="hidden sm:inline">AI 프롬프트 작성</span>
                   <span className="sm:hidden">프롬프트 작성</span>
                 </button>
@@ -1223,7 +1246,7 @@ ${existingAnecdotes.join(', ')}`;
                 >
                   {uploadStatus === 'uploading' ? (
                     <>
-                      <Loader2 className="w-4 h-4 md:w-5 md:h-5 animate-spin" />
+                      <Settings className="w-4 h-4 md:w-5 md:h-5 animate-spin" />
                       업로드 중...
                     </>
                   ) : uploadStatus === 'success' ? (

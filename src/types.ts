@@ -7,6 +7,7 @@ export interface Topic {
   가치: string;
   영상앵글: string;
   검색키워드: string;
+  핵심키워드: string;
   인물지수?: number;
   연관키워드?: string;
   연관키워드지수?: number;

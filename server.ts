@@ -8,7 +8,13 @@ import { google } from "googleapis";
 // Helper to safely parse JSON from Google Trends API
 const safeJsonParse = (data: any) => {
   if (typeof data !== 'string') return null;
-  const trimmed = data.trim();
+  let trimmed = data.trim();
+  
+  // Google Trends API often prefixes responses with )]}'
+  if (trimmed.startsWith(")]}'")) {
+    trimmed = trimmed.substring(4).trim();
+  }
+
   // Check for common HTML indicators, including the weird "L><HEAD>" case
   if (trimmed.startsWith('<') || trimmed.includes('<HTML') || trimmed.includes('<HEAD') || trimmed.includes('L><HEAD')) {
     console.warn("Google Trends returned HTML (likely rate limited)");
@@ -22,6 +28,7 @@ const safeJsonParse = (data: any) => {
       console.warn("Google Trends returned non-JSON response (likely rate limited)");
     } else {
       console.error("JSON Parse Error:", e);
+      console.log("Raw data snippet:", trimmed.substring(0, 100));
     }
     return null;
   }
@@ -39,20 +46,24 @@ async function startServer() {
     const { keyword } = req.query;
     if (!keyword) return res.status(400).json({ error: "Keyword is required" });
 
+    console.log(`[Trends] Fetching for: ${keyword}`);
     try {
       // Fetch last 14 days to compare (Recent 7 vs Previous 7)
       const results = await googleTrends.interestOverTime({
         keyword: keyword as string,
         startTime: new Date(Date.now() - 14 * 24 * 60 * 60 * 1000),
+        geo: 'KR',
+        hl: 'ko'
       });
 
       if (typeof results === 'string' && results.trim().startsWith('<')) {
-        console.warn(`Google Trends blocked for keyword: ${keyword}`);
+        console.warn(`[Trends] Blocked for keyword: ${keyword}`);
         return res.json({ recentAverage: 0, growthRate: 0, raw: null });
       }
 
       const data = safeJsonParse(results);
-      if (!data) {
+      if (!data || !data.default) {
+        console.warn(`[Trends] No data or invalid JSON for: ${keyword}`);
         return res.json({ recentAverage: 0, growthRate: 0, raw: null });
       }
       const timelineData = data.default.timelineData;
@@ -72,21 +83,22 @@ async function startServer() {
         
         const growthRate = previousAvg === 0 ? recentAvg * 100 : ((recentAvg - previousAvg) / previousAvg) * 100;
         
+        console.log(`[Trends] Success for ${keyword}: Avg=${Math.round(recentAvg)}, Growth=${Math.round(growthRate)}%`);
         res.json({
           recentAverage: Math.round(recentAvg),
           growthRate: Math.round(growthRate),
           raw: data
         });
       } else {
+        console.warn(`[Trends] Empty timelineData for: ${keyword}`);
         res.json({ recentAverage: 0, growthRate: 0, raw: data });
       }
     } catch (error: any) {
       if (error.message?.includes("Unexpected token") || error.message?.includes("is not valid JSON")) {
-        console.warn(`Trends API Rate Limited for: ${keyword}`);
+        console.warn(`[Trends] Rate Limited for: ${keyword}`);
       } else {
-        console.error("Trends API Error:", error);
+        console.error("[Trends] API Error:", error);
       }
-      // Fallback to 0 instead of 500 error to keep the app running
       res.json({ recentAverage: 0, growthRate: 0, raw: null });
     }
   });
@@ -95,22 +107,29 @@ async function startServer() {
     const { keyword } = req.query;
     if (!keyword) return res.status(400).json({ error: "Keyword is required" });
 
+    console.log(`[RelatedQueries] Fetching for: ${keyword}`);
     try {
       const results = await googleTrends.relatedQueries({
         keyword: keyword as string,
+        geo: 'KR',
+        hl: 'ko'
       });
 
       if (typeof results === 'string' && results.trim().startsWith('<')) {
+        console.warn(`[RelatedQueries] Blocked for keyword: ${keyword}`);
         return res.json({ default: { rankedList: [] } });
       }
 
       const data = safeJsonParse(results);
+      if (data) {
+        console.log(`[RelatedQueries] Success for ${keyword}: Found ${data.default?.rankedList?.length || 0} lists`);
+      }
       res.json(data || { default: { rankedList: [] } });
     } catch (error: any) {
       if (error.message?.includes("Unexpected token") || error.message?.includes("is not valid JSON")) {
-        console.warn(`Related Queries API Rate Limited for: ${keyword}`);
+        console.warn(`[RelatedQueries] Rate Limited for: ${keyword}`);
       } else {
-        console.error("Related Queries API Error:", error);
+        console.error("[RelatedQueries] API Error:", error);
       }
       res.json({ default: { rankedList: [] } });
     }
